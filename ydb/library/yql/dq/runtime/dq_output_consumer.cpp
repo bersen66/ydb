@@ -1,5 +1,9 @@
 #include "dq_output_consumer.h"
+#include "util/system/env.h"
+#include <fstream>
 
+#include <map>
+#include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/dq/actors/protos/dq_events.pb.h>
 #include <ydb/library/yql/minikql/computation/mkql_block_builder.h>
 #include <ydb/library/yql/minikql/computation/mkql_block_reader.h>
@@ -97,6 +101,63 @@ private:
     IDqOutput::TPtr Output;
 };
 
+class MetricsAccumulator {
+public:
+    struct Metrics {
+        ui64 callTimes = 0;
+        ui64 bytesProcessed = 0;
+        ui64 rowsCount = 0;
+    };
+public:
+    MetricsAccumulator(const std::string& OutputFile)
+        : Results(OutputFile)
+    {
+        YQL_ENSURE(Results);
+        for (int i = 0; i < 30; i++) {
+            loadHistogramm[i];
+        }
+    }
+
+    void RememberLoad(std::size_t partition, ui64 bytes, ui64 rowsProcessed) {
+        loadHistogramm[partition].callTimes++;
+        (void)bytes;
+        loadHistogramm[partition].rowsCount += rowsProcessed;
+    }
+
+    void AddType(NUdf::TDataTypeId type) {
+        typeInfo[type]++;
+    }
+
+    void AddShuffle() {shuffleTimes++;}
+
+    ~MetricsAccumulator() {
+        Results << "UniqueTypes = " << typeInfo.size()
+                << "\nShuffleTimes = " << shuffleTimes
+                << "\nPartition, CallTimes, RowsProcessed\n";
+        for (const auto& [partition, metrics] : loadHistogramm) {
+            Results << partition << ", " << metrics.callTimes
+                    << ", " << metrics.rowsCount
+                    << "\n";
+        }
+    }
+
+private:
+    std::ofstream Results;
+    std::map<std::size_t, Metrics> loadHistogramm;
+    std::map<NUdf::TDataTypeId, ui64> typeInfo;
+    ui64 shuffleTimes = 0;
+};
+
+std::string DumpName() {
+    std::string name = "info_dump/q" + GetEnv("QUERY_NUM") + ".csv";
+    return name;
+}
+
+MetricsAccumulator& GetMetricsAccumulator() {
+    static MetricsAccumulator results(DumpName());
+    return results;
+}
+
 class TDqOutputHashPartitionConsumer : public IDqOutputConsumer {
 private:
     mutable bool IsWaitingFlag = false;
@@ -146,6 +207,10 @@ public:
     void Consume(TUnboxedValue&& value) final {
         YQL_ENSURE(!OutputWidth.Defined());
         ui32 partitionIndex = GetHashPartitionIndex(value);
+
+        auto& results = GetMetricsAccumulator();
+        results.RememberLoad(partitionIndex, 0, 1);
+
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
             IsWaitingFlag = true;
@@ -159,6 +224,10 @@ public:
     void WideConsume(TUnboxedValue* values, ui32 count) final {
         YQL_ENSURE(OutputWidth.Defined() && count == OutputWidth);
         ui32 partitionIndex = GetHashPartitionIndex(values);
+
+        auto& results = GetMetricsAccumulator();
+        results.RememberLoad(partitionIndex, 0, count);
+
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
             IsWaitingFlag = true;
@@ -189,7 +258,6 @@ private:
             auto columnValue = value.GetElement(KeyColumns[keyId].Index);
             hash = CombineHashes(hash, HashColumn(keyId, columnValue));
         }
-
         return hash % Outputs.size();
     }
 
@@ -200,7 +268,6 @@ private:
             MKQL_ENSURE_S(KeyColumns[keyId].Index < OutputWidth);
             hash = CombineHashes(hash, HashColumn(keyId, values[KeyColumns[keyId].Index]));
         }
-
         return hash % Outputs.size();
     }
 
@@ -254,15 +321,20 @@ private:
         if (!inputBlockLen) {
             return;
         }
+        auto& res = GetMetricsAccumulator();
 
         if (!Output_) {
-            Output_ = Outputs_[GetHashPartitionIndex(values)];
+            auto partition = GetHashPartitionIndex(values);
+            res.RememberLoad(partition, 0, count);
+            Output_ = Outputs_[partition];
+            OutputIdx = partition;
         }
         if (Output_->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag_);
             IsWaitingFlag_ = true;
             std::move(values, values + count, WaitingValues_.data());
         } else {
+            res.RememberLoad(OutputIdx, 0, count);
             Output_->WidePush(values, count);
         }
     }
@@ -319,6 +391,7 @@ private:
     TVector<NUdf::IBlockItemHasher::TPtr> Hashers_;
     TVector<std::unique_ptr<IBlockReader>> Readers_;
     IDqOutput::TPtr Output_;
+    std::size_t OutputIdx;
     mutable bool IsWaitingFlag_ = false;
     mutable TUnboxedValueVector WaitingValues_;
 };
@@ -376,6 +449,7 @@ private:
         YQL_ENSURE(count == OutputWidth_);
 
         const ui64 inputBlockLen = TArrowBlock::From(values[count - 1]).GetDatum().scalar_as<arrow::UInt64Scalar>().value;
+
         if (!inputBlockLen) {
             return;
         }
@@ -617,6 +691,13 @@ IDqOutputConsumer::TPtr CreateOutputHashPartitionConsumer(
     TMaybe<ui32> outputWidth;
     if (outputType->IsMulti()) {
         outputWidth = static_cast<const NMiniKQL::TMultiType*>(outputType)->GetElementsCount();
+    }
+
+
+    auto& results = GetMetricsAccumulator();
+    results.AddShuffle();
+    for (const auto& column : keyColumns) {
+        results.AddType(column.GetTypeId());
     }
 
     if (AnyOf(keyColumns, [](const auto& info) { return !info.IsBlockOrScalar(); })) {
