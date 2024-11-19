@@ -1,8 +1,5 @@
 #include "dq_output_consumer.h"
-#include "util/system/env.h"
-#include <fstream>
-
-#include <map>
+#include "dq_metrics_accumulator.h"
 #include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/dq/actors/protos/dq_events.pb.h>
 #include <ydb/library/yql/minikql/computation/mkql_block_builder.h>
@@ -101,62 +98,7 @@ private:
     IDqOutput::TPtr Output;
 };
 
-class MetricsAccumulator {
-public:
-    struct Metrics {
-        ui64 callTimes = 0;
-        ui64 bytesProcessed = 0;
-        ui64 rowsCount = 0;
-    };
-public:
-    MetricsAccumulator(const std::string& OutputFile)
-        : Results(OutputFile)
-    {
-        YQL_ENSURE(Results);
-        for (int i = 0; i < 30; i++) {
-            loadHistogramm[i];
-        }
-    }
 
-    void RememberLoad(std::size_t partition, ui64 bytes, ui64 rowsProcessed) {
-        loadHistogramm[partition].callTimes++;
-        (void)bytes;
-        loadHistogramm[partition].rowsCount += rowsProcessed;
-    }
-
-    void AddType(NUdf::TDataTypeId type) {
-        typeInfo[type]++;
-    }
-
-    void AddShuffle() {shuffleTimes++;}
-
-    ~MetricsAccumulator() {
-        Results << "UniqueTypes = " << typeInfo.size()
-                << "\nShuffleTimes = " << shuffleTimes
-                << "\nPartition, CallTimes, RowsProcessed\n";
-        for (const auto& [partition, metrics] : loadHistogramm) {
-            Results << partition << ", " << metrics.callTimes
-                    << ", " << metrics.rowsCount
-                    << "\n";
-        }
-    }
-
-private:
-    std::ofstream Results;
-    std::map<std::size_t, Metrics> loadHistogramm;
-    std::map<NUdf::TDataTypeId, ui64> typeInfo;
-    ui64 shuffleTimes = 0;
-};
-
-std::string DumpName() {
-    std::string name = "info_dump/q" + GetEnv("QUERY_NUM") + ".csv";
-    return name;
-}
-
-MetricsAccumulator& GetMetricsAccumulator() {
-    static MetricsAccumulator results(DumpName());
-    return results;
-}
 
 class TDqOutputHashPartitionConsumer : public IDqOutputConsumer {
 private:
@@ -695,6 +637,7 @@ IDqOutputConsumer::TPtr CreateOutputHashPartitionConsumer(
 
 
     auto& results = GetMetricsAccumulator();
+    results.MaybeNewStage();
     results.AddShuffle();
     for (const auto& column : keyColumns) {
         results.AddType(column.GetTypeId());

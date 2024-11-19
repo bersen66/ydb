@@ -1,4 +1,7 @@
 #include "dq_tasks_runner.h"
+#include "library/cpp/yt/string/string_builder.h"
+#include "ydb/library/yql/dq/runtime/dq_metrics_accumulator.h"
+#include "dq_metrics_accumulator.h"
 
 #include <ydb/library/yql/dq/actors/spilling/spilling_counters.h>
 #include <ydb/library/yql/minikql/comp_nodes/mkql_multihopping.h>
@@ -240,10 +243,10 @@ public:
 
         if (Context.TypeEnv) {
             YQL_ENSURE(std::addressof(alloc) == std::addressof(TypeEnv().GetAllocator()));
-        } else {            
+        } else {
             AllocatedHolder->SelfTypeEnv = std::make_unique<TTypeEnvironment>(alloc);
         }
-        
+
     }
 
     ~TDqTaskRunner() {
@@ -666,6 +669,15 @@ public:
             }
 
             {
+                auto& ma = GetMetricsAccumulator();
+
+                auto DstStageId = outputDesc.GetChannels(0).GetDstStageId();
+                auto SrcStageId = outputDesc.GetChannels(0).GetSrcStageId();
+
+                ma.SetDstStageId(DstStageId);
+                ma.SetSrcStageId(SrcStageId);
+                ma.MaybeNewStage();
+                LOG(TStringBuilder() << "ABOBA" << DstStageId << " -- " << SrcStageId);
                 auto guard = BindAllocator();
                 outputConsumers[i] = execCtx.CreateOutputConsumer(outputDesc, entry->OutputItemTypes[i],
                     Context.ApplyCtx, typeEnv, holderFactory, std::move(outputs));
@@ -828,7 +840,7 @@ public:
     const NKikimr::NMiniKQL::THolderFactory& GetHolderFactory() const override {
         return AllocatedHolder->ProgramParsed.CompGraph->GetHolderFactory();
     }
-    
+
     NKikimr::NMiniKQL::TScopedAlloc& GetAllocator() const override {
         return Alloc();
     }

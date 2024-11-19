@@ -29,6 +29,7 @@ SRCS(
     dq_output_consumer.cpp
     dq_tasks_runner.cpp
     dq_transport.cpp
+    dq_metrics_accumulator.cpp
 )
 
 GENERATE_ENUM_SERIALIZATION(dq_tasks_runner.h)
