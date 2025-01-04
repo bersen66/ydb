@@ -1,5 +1,6 @@
 #include "dq_output_consumer.h"
-
+#include "dq_metrics_accumulator.h"
+#include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/dq/actors/protos/dq_events.pb.h>
 #include <ydb/library/yql/minikql/computation/mkql_block_builder.h>
 #include <ydb/library/yql/minikql/computation/mkql_block_reader.h>
@@ -97,6 +98,8 @@ private:
     IDqOutput::TPtr Output;
 };
 
+
+
 class TDqOutputHashPartitionConsumer : public IDqOutputConsumer {
 private:
     mutable bool IsWaitingFlag = false;
@@ -124,7 +127,9 @@ protected:
         return !IsWaitingFlag;
     }
 public:
-    TDqOutputHashPartitionConsumer(TVector<IDqOutput::TPtr>&& outputs, TVector<TColumnInfo>&& keyColumns, TMaybe<ui32> outputWidth)
+    TDqOutputHashPartitionConsumer(TVector<IDqOutput::TPtr>&& outputs,
+                                   TVector<TColumnInfo>&& keyColumns,
+                                   TMaybe<ui32> outputWidth)
         : Outputs(std::move(outputs))
         , KeyColumns(std::move(keyColumns))
         , OutputWidth(outputWidth)
@@ -146,6 +151,10 @@ public:
     void Consume(TUnboxedValue&& value) final {
         YQL_ENSURE(!OutputWidth.Defined());
         ui32 partitionIndex = GetHashPartitionIndex(value);
+
+        auto& results = GetMetricsAccumulator();
+        results.RememberLoad(StageID, partitionIndex, 0, 1);
+
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
             IsWaitingFlag = true;
@@ -159,6 +168,10 @@ public:
     void WideConsume(TUnboxedValue* values, ui32 count) final {
         YQL_ENSURE(OutputWidth.Defined() && count == OutputWidth);
         ui32 partitionIndex = GetHashPartitionIndex(values);
+
+        auto& results = GetMetricsAccumulator();
+        results.RememberLoad(StageID, partitionIndex, 0, count);
+
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
             IsWaitingFlag = true;
@@ -189,7 +202,6 @@ private:
             auto columnValue = value.GetElement(KeyColumns[keyId].Index);
             hash = CombineHashes(hash, HashColumn(keyId, columnValue));
         }
-
         return hash % Outputs.size();
     }
 
@@ -200,7 +212,6 @@ private:
             MKQL_ENSURE_S(KeyColumns[keyId].Index < OutputWidth);
             hash = CombineHashes(hash, HashColumn(keyId, values[KeyColumns[keyId].Index]));
         }
-
         return hash % Outputs.size();
     }
 
@@ -220,7 +231,9 @@ private:
 
 class TDqOutputHashPartitionConsumerScalar : public IDqOutputConsumer {
 public:
-    TDqOutputHashPartitionConsumerScalar(TVector<IDqOutput::TPtr>&& outputs, TVector<TColumnInfo>&& keyColumns, const  NKikimr::NMiniKQL::TType* outputType)
+    TDqOutputHashPartitionConsumerScalar(TVector<IDqOutput::TPtr>&& outputs,
+                                         TVector<TColumnInfo>&& keyColumns,
+                                         const NKikimr::NMiniKQL::TType* outputType)
         : Outputs_(std::move(outputs))
         , KeyColumns_(std::move(keyColumns))
         , OutputWidth_(static_cast<const NMiniKQL::TMultiType*>(outputType)->GetElementsCount())
@@ -254,15 +267,20 @@ private:
         if (!inputBlockLen) {
             return;
         }
+        auto& res = GetMetricsAccumulator();
 
         if (!Output_) {
-            Output_ = Outputs_[GetHashPartitionIndex(values)];
+            auto partition = GetHashPartitionIndex(values);
+            res.RememberLoad(StageID, partition, 0, count);
+            Output_ = Outputs_[partition];
+            OutputIdx = partition;
         }
         if (Output_->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag_);
             IsWaitingFlag_ = true;
             std::move(values, values + count, WaitingValues_.data());
         } else {
+            res.RememberLoad(StageID, OutputIdx, 0, count);
             Output_->WidePush(values, count);
         }
     }
@@ -319,6 +337,7 @@ private:
     TVector<NUdf::IBlockItemHasher::TPtr> Hashers_;
     TVector<std::unique_ptr<IBlockReader>> Readers_;
     IDqOutput::TPtr Output_;
+    std::size_t OutputIdx;
     mutable bool IsWaitingFlag_ = false;
     mutable TUnboxedValueVector WaitingValues_;
 };
@@ -376,6 +395,7 @@ private:
         YQL_ENSURE(count == OutputWidth_);
 
         const ui64 inputBlockLen = TArrowBlock::From(values[count - 1]).GetDatum().scalar_as<arrow::UInt64Scalar>().value;
+
         if (!inputBlockLen) {
             return;
         }
