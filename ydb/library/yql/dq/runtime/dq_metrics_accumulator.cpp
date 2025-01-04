@@ -27,69 +27,53 @@ MetricsAccumulator::MetricsAccumulator(const std::string& OutputFile)
     : Results(OutputFile)
 {
     TGuard<TMutex> l{mutex};
-    YQL_ENSURE(Results);
-    for (int i = 0; i < 30; i++) {
-        CurrentStage().loadHistogramm[i];
-    }
+    YQL_ENSURE(Results.good());
 }
 
-void MetricsAccumulator::RememberLoad(std::size_t partition, ui64 bytes, ui64 rowsProcessed) {
+void MetricsAccumulator::RememberLoad(const StageId& stage, std::size_t partition, ui64 bytes, ui64 rowsProcessed) {
     TGuard<TMutex> l{mutex};
-    CurrentStage().loadHistogramm[partition].callTimes++;
+    sm[stage].loadHistogramm[partition].callTimes++;
     (void)bytes;
-    CurrentStage().loadHistogramm[partition].rowsCount += rowsProcessed;
+    sm[stage].loadHistogramm[partition].rowsCount += rowsProcessed;
 }
 
-void MetricsAccumulator::AddType(NUdf::TDataTypeId type) {
+void MetricsAccumulator::AddType(const StageId& stage, NUdf::TDataTypeId type) {
     TGuard<TMutex> l{mutex};
-    CurrentStage().typeInfo[type]++;
+    sm[stage].typeInfo[type]++;
 }
-
-void MetricsAccumulator::AddShuffle() {CurrentStage().shuffleTimes++;}
 
 MetricsAccumulator::~MetricsAccumulator() {
     TGuard<TMutex> l{mutex};
-
     for (const auto& [stage, stageMetrics] : sm) {
-        Results << "\nStageId = " << stage
-                << "\nUniqueTypes = " << stageMetrics.typeInfo.size()
-                << "\nShuffleTimes = " << stageMetrics.shuffleTimes
-                << "\nPartition, CallTimes, RowsProcessed\n";
+        Results << "\nTransition: " << stage
+                << "\nPartition, RowsProcessed\n";
         for (const auto& [partition, metrics] : stageMetrics.loadHistogramm) {
-            Results << partition << ", " << metrics.callTimes
-                    << ", " << metrics.rowsCount
-                    << "\n";
+            Results << partition << ", " << metrics.rowsCount << "\n";
         }
     }
-}
+    Results << "\n ========================================== \n";
+    std::unordered_map<std::size_t, std::map<ui64, ui64>> results;
+    for (const auto& [stage, stageMetrics] : sm) {
 
-void MetricsAccumulator::SetDstStageId(ui32 v) {
-    TGuard<TMutex> l{mutex};
-    newDstStageId = v;
-}
+        for (const auto& [p, metrics] : stageMetrics.loadHistogramm) {
+            results[stage.dest][p] += metrics.rowsCount;
+        }
+    }
 
-void MetricsAccumulator::SetSrcStageId(ui32 v) {
-    TGuard<TMutex> l{mutex};
-    newSrcStageId = v;
+
+    for (const auto& [stage, hist]: results) {
+        Results << "\nStage: " << stage << "\n";
+        for (const auto& [partition, load] : hist) {
+            Results << "\t" << partition << ": " << load << "\n";
+        }
+    }
+
 }
 
 void InitStage(MetricsAccumulator::StageMetrics& m) {
      for (int i = 0; i < 30; i++) {
         m.loadHistogramm[i];
      }
-}
-
-void MetricsAccumulator::MaybeNewStage() {
-    TGuard<TMutex> l{mutex};
-    bool changed = srcStageId != newSrcStageId ||
-                   dstStageId != newDstStageId;
-
-    srcStageId = newSrcStageId;
-    dstStageId = newDstStageId;
-
-    if (changed) {
-        InitStage(CurrentStage());
-    }
 }
 
 std::string DumpName() {
@@ -103,7 +87,7 @@ MetricsAccumulator& GetMetricsAccumulator() {
 }
 
 std::ostream& operator<<(std::ostream& out, StageId id) {
-    out << "(" << id.dest << ", " << id.src << ")";
+    out << "(" << id.src << " -> " << id.dest << ")";
     return out;
 }
 

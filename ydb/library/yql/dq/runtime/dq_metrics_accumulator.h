@@ -1,6 +1,5 @@
 #pragma once
 
-#include "boost/container_hash/hash_fwd.hpp"
 #include "library/cpp/yt/misc/hash.h"
 #include "util/system/mutex.h"
 #include <fstream>
@@ -21,7 +20,9 @@ bool operator==(const StageId& lhs, const StageId& rhs);
 
 struct StageHasher {
     std::size_t operator()(const StageId& s) const {
-        std::size_t seed = 37 * 37 * s.dest + 37 * s.src;
+        std::size_t seed = 0;
+        NYT::HashCombine(seed, s.dest);
+        NYT::HashCombine(seed, s.src);
         return seed;
     }
 };
@@ -44,11 +45,9 @@ public:
 public:
     MetricsAccumulator(const std::string& OutputFile);
 
-    void RememberLoad(std::size_t partition, ui64 bytes, ui64 rowsProcessed);
+    void RememberLoad(const StageId& stage, std::size_t partition, ui64 bytes, ui64 rowsProcessed);
 
-    void AddType(NUdf::TDataTypeId type);
-
-    void AddShuffle();
+    void AddType(const StageId& stage, NUdf::TDataTypeId type);
 
     ~MetricsAccumulator();
 
@@ -58,16 +57,8 @@ public:
 
     void MaybeNewStage();
 private:
-    StageMetrics& CurrentStage() {
-        return sm[StageId{dstStageId, srcStageId}];
-    }
-private:
     std::ofstream Results;
     StageMap sm;
-    ui32 srcStageId;
-    ui32 dstStageId;
-    ui32 newSrcStageId;
-    ui32 newDstStageId;
     TMutex mutex;
 };
 

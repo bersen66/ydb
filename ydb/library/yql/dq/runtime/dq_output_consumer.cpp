@@ -127,7 +127,9 @@ protected:
         return !IsWaitingFlag;
     }
 public:
-    TDqOutputHashPartitionConsumer(TVector<IDqOutput::TPtr>&& outputs, TVector<TColumnInfo>&& keyColumns, TMaybe<ui32> outputWidth)
+    TDqOutputHashPartitionConsumer(TVector<IDqOutput::TPtr>&& outputs,
+                                   TVector<TColumnInfo>&& keyColumns,
+                                   TMaybe<ui32> outputWidth)
         : Outputs(std::move(outputs))
         , KeyColumns(std::move(keyColumns))
         , OutputWidth(outputWidth)
@@ -151,7 +153,7 @@ public:
         ui32 partitionIndex = GetHashPartitionIndex(value);
 
         auto& results = GetMetricsAccumulator();
-        results.RememberLoad(partitionIndex, 0, 1);
+        results.RememberLoad(StageID, partitionIndex, 0, 1);
 
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
@@ -168,7 +170,7 @@ public:
         ui32 partitionIndex = GetHashPartitionIndex(values);
 
         auto& results = GetMetricsAccumulator();
-        results.RememberLoad(partitionIndex, 0, count);
+        results.RememberLoad(StageID, partitionIndex, 0, count);
 
         if (Outputs[partitionIndex]->IsFull()) {
             YQL_ENSURE(!IsWaitingFlag);
@@ -229,7 +231,9 @@ private:
 
 class TDqOutputHashPartitionConsumerScalar : public IDqOutputConsumer {
 public:
-    TDqOutputHashPartitionConsumerScalar(TVector<IDqOutput::TPtr>&& outputs, TVector<TColumnInfo>&& keyColumns, const  NKikimr::NMiniKQL::TType* outputType)
+    TDqOutputHashPartitionConsumerScalar(TVector<IDqOutput::TPtr>&& outputs,
+                                         TVector<TColumnInfo>&& keyColumns,
+                                         const NKikimr::NMiniKQL::TType* outputType)
         : Outputs_(std::move(outputs))
         , KeyColumns_(std::move(keyColumns))
         , OutputWidth_(static_cast<const NMiniKQL::TMultiType*>(outputType)->GetElementsCount())
@@ -267,7 +271,7 @@ private:
 
         if (!Output_) {
             auto partition = GetHashPartitionIndex(values);
-            res.RememberLoad(partition, 0, count);
+            res.RememberLoad(StageID, partition, 0, count);
             Output_ = Outputs_[partition];
             OutputIdx = partition;
         }
@@ -276,7 +280,7 @@ private:
             IsWaitingFlag_ = true;
             std::move(values, values + count, WaitingValues_.data());
         } else {
-            res.RememberLoad(OutputIdx, 0, count);
+            res.RememberLoad(StageID, OutputIdx, 0, count);
             Output_->WidePush(values, count);
         }
     }
@@ -633,14 +637,6 @@ IDqOutputConsumer::TPtr CreateOutputHashPartitionConsumer(
     TMaybe<ui32> outputWidth;
     if (outputType->IsMulti()) {
         outputWidth = static_cast<const NMiniKQL::TMultiType*>(outputType)->GetElementsCount();
-    }
-
-
-    auto& results = GetMetricsAccumulator();
-    results.MaybeNewStage();
-    results.AddShuffle();
-    for (const auto& column : keyColumns) {
-        results.AddType(column.GetTypeId());
     }
 
     if (AnyOf(keyColumns, [](const auto& info) { return !info.IsBlockOrScalar(); })) {

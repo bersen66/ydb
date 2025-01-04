@@ -669,18 +669,14 @@ public:
             }
 
             {
-                auto& ma = GetMetricsAccumulator();
+                ui32 DstStageId = outputDesc.GetChannels(0).GetDstStageId();
+                ui32 SrcStageId = outputDesc.GetChannels(0).GetSrcStageId();
 
-                auto DstStageId = outputDesc.GetChannels(0).GetDstStageId();
-                auto SrcStageId = outputDesc.GetChannels(0).GetSrcStageId();
-
-                ma.SetDstStageId(DstStageId);
-                ma.SetSrcStageId(SrcStageId);
-                ma.MaybeNewStage();
-                LOG(TStringBuilder() << "ABOBA" << DstStageId << " -- " << SrcStageId);
                 auto guard = BindAllocator();
                 outputConsumers[i] = execCtx.CreateOutputConsumer(outputDesc, entry->OutputItemTypes[i],
                     Context.ApplyCtx, typeEnv, holderFactory, std::move(outputs));
+
+                outputConsumers[i]->SetStageId(StageId{DstStageId, SrcStageId});
             }
         }
 

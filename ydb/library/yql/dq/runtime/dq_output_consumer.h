@@ -2,7 +2,7 @@
 
 #include "dq_columns_resolve.h"
 #include "dq_output.h"
-
+#include <ydb/library/yql/dq/runtime/dq_metrics_accumulator.h>
 #include <ydb/library/yql/minikql/mkql_alloc.h>
 
 namespace NKikimr::NMiniKQL {
@@ -18,9 +18,12 @@ private:
     bool IsFinishingFlag = false;
 public:
     using TPtr = TIntrusivePtr<IDqOutputConsumer>;
-
 public:
     virtual ~IDqOutputConsumer() = default;
+    
+    void SetStageId(const StageId& stage) {
+        StageID = stage;
+    }
 
     bool TryFinish() {
         IsFinishingFlag = true;
@@ -38,6 +41,8 @@ protected:
     virtual bool DoTryFinish() {
         return true;
     }
+protected:
+    StageId StageID;
 };
 
 IDqOutputConsumer::TPtr CreateOutputMultiConsumer(TVector<IDqOutputConsumer::TPtr>&& consumers);
